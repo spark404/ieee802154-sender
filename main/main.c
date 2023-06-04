@@ -4,9 +4,11 @@
 #include <esp_ieee802154.h>
 #include <esp_log.h>
 #include <esp_phy_init.h>
+#include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "ieee802154.h"
 #include "sdkconfig.h"
 
 #define TAG "main"
@@ -15,25 +17,18 @@
 #define PANID 0x4242
 #define CHANNEL 11
 
+#define SHORT_BROADCAST 0xFFFF
 #define SHORT_NOT_CONFIGURED 0xFFFE
 #define SHORT_SENDER 0x1111
 
-static uint8_t test_packet[] = {
-        // Length
-        0x67,
-        // Header
-        0x01, 0xc8, 0x00, 0xff, 0xff, 0xff, 0xff, 0x47,
-        0x44, 0xff, 0xff, 0x19, 0x3b, 0x02, 0x92, 0x83,
-        0x02,
-        // Data
-        0xd7, 0x85, 0x1c, 0xcf, 0xbc, 0x1e, 0xa4,
-        0xa6, 0xcb, 0x7e, 0xee, 0x89, 0x9a, 0x7e, 0xd0,
-        0x38, 0x77, 0x42, 0xf2, 0xad, 0x85, 0xd4, 0x8e,
-        0x20, 0xbe, 0xb3, 0x59, 0x42, 0xd3, 0x24, 0x51,
-        0x72, 0x20, 0xc2, 0xa9, 0xb9, 0xa2, 0x48, 0x81,
-        0x01, 0x4a, 0x4f, 0xae, 0x00, 0x00, 0x00, 0x00,
-        // FCS
-        0x00, 0x00
+#define PAN_BROADCAST 0xFFFF
+
+#define FCS_LEN 2
+
+static uint8_t test_frame[] = {
+        0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x13, 0x01, 0x00, 0x00, 0x08, 0x00, 0x28, 0x0a, 0x00, 0x80,
+        0x00, 0x28, 0x01, 0x1d, 0x00, 0x43, 0x00, 0x02, 0x00, 0xc8, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
 void esp_ieee802154_transmit_done(const uint8_t *frame, const uint8_t *ack, esp_ieee802154_frame_info_t *ack_frame_info) {
@@ -56,6 +51,8 @@ void app_main() {
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+    ESP_ERROR_CHECK(encoder_init());
 
     ESP_ERROR_CHECK(esp_ieee802154_enable());
     ESP_ERROR_CHECK(esp_ieee802154_set_promiscuous(true));
@@ -86,15 +83,36 @@ void app_main() {
              radio_long_address[4], radio_long_address[5], radio_long_address[6], radio_long_address[7],
              esp_ieee802154_get_short_address());
 
-    int j = 17;
-    for (int i = 0; i < 8; ++i) {
-        test_packet[j--] = radio_long_address[i];
-    }
+    uint8_t packet[127];
+    uint16_t src_pan = 0x4447;
+    ieee802154_address_t src = {
+            .mode = ADDR_MODE_LONG,
+            .long_address = {
+                    radio_long_address[0], radio_long_address[1], radio_long_address[2], radio_long_address[3],
+                    radio_long_address[4], radio_long_address[5], radio_long_address[6], radio_long_address[7]
+            }
+    };
+    uint16_t dst_pan = PAN_BROADCAST;
+    ieee802154_address_t dst = {
+        .mode = ADDR_MODE_SHORT,
+        .short_address = SHORT_BROADCAST
+    };
+
 
     // All done, the rest is up to handlers
     while (true) {
-        esp_ieee802154_transmit(test_packet, false);
+        uint32_t timestamp = (uint32_t) trunc((xTaskGetTickCount() / (double)xPortGetTickRateHz()) * 1000);
+        uint8_t *hdr = &packet[1];
+        uint8_t hdr_len = iee802154_header(&src_pan, &src, &dst_pan, &dst, hdr, 126);
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        uint8_t *payload = &packet[1 + hdr_len];
+        uint8_t payload_len = encode_packet(timestamp, test_frame, sizeof(test_frame), hdr, hdr_len, src.long_address, payload, 126 - hdr_len);
+
+        packet[0] = hdr_len + payload_len + FCS_LEN;
+        ESP_LOGI(TAG, "Packet: len=%d, hdr=%d, payload=%d", packet[0], hdr_len, payload_len);
+        ESP_LOG_BUFFER_HEX(TAG, packet, packet[0] + 1);
+        esp_ieee802154_transmit(packet, false);
+
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
