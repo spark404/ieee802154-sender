@@ -17,7 +17,5 @@ typedef struct {
 } ieee802154_address_t ;
 
 uint8_t iee802154_header(const uint16_t *src_pan, ieee802154_address_t *src, const uint16_t *dst_pan, ieee802154_address_t *dst, uint8_t *header, uint8_t header_length);
-esp_err_t encoder_init();
-uint8_t encode_packet(uint32_t timestamp, uint8_t* plaintext, uint8_t plaintext_length, uint8_t* header, uint8_t header_length, const uint8_t* src_addr, uint8_t *output, uint8_t output_length);
 
 #endif  // EPD_STATION_IEEE802154_H

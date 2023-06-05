@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "ieee802154.h"
+#include "esp_esl.h"
 #include "sdkconfig.h"
 
 #define TAG "main"
@@ -52,7 +53,7 @@ void app_main() {
     }
     ESP_ERROR_CHECK(err);
 
-    ESP_ERROR_CHECK(encoder_init());
+    ESP_ERROR_CHECK(esp_esl_aes_ccm_init());
 
     ESP_ERROR_CHECK(esp_ieee802154_enable());
     ESP_ERROR_CHECK(esp_ieee802154_set_promiscuous(true));
@@ -106,7 +107,7 @@ void app_main() {
         uint8_t hdr_len = iee802154_header(&src_pan, &src, &dst_pan, &dst, hdr, 126);
 
         uint8_t *payload = &packet[1 + hdr_len];
-        uint8_t payload_len = encode_packet(timestamp, test_frame, sizeof(test_frame), hdr, hdr_len, src.long_address, payload, 126 - hdr_len);
+        uint8_t payload_len = esp_esl_aes_ccm_encode(timestamp, test_frame, sizeof(test_frame), hdr, hdr_len, src.long_address, payload, 126 - hdr_len);
 
         packet[0] = hdr_len + payload_len + FCS_LEN;
         ESP_LOGI(TAG, "Packet: len=%d, hdr=%d, payload=%d", packet[0], hdr_len, payload_len);
