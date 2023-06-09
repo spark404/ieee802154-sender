@@ -4,38 +4,38 @@
 #include <esp_ieee802154.h>
 #include <esp_log.h>
 #include <esp_phy_init.h>
+#include <esp_mac.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "ieee802154.h"
+
 #define TAG "main"
 #define RADIO_TAG "ieee802154"
 
+#define PAN_BROADCAST 0xFFFF
 #define PANID 0x4242
-#define CHANNEL 11
+#define CHANNEL 19
 
+#define SHORT_BROADCAST 0xFFFF
 #define SHORT_NOT_CONFIGURED 0xFFFE
-#define SHORT_SENDER 0x1111
+#define SHORT_TEST_SENDER 0x1111
+#define SHORT_TEST_RECEIVER 0x2222
 
-static uint8_t test_packet[] = {
-        // Length
-        0x67,
-        // Header
-        0x01, 0xc8, 0x00, 0xff, 0xff, 0xff, 0xff, 0x47,
-        0x44, 0xff, 0xff, 0x19, 0x3b, 0x02, 0x92, 0x83,
-        0x02,
-        // Data
-        0xd7, 0x85, 0x1c, 0xcf, 0xbc, 0x1e, 0xa4,
-        0xa6, 0xcb, 0x7e, 0xee, 0x89, 0x9a, 0x7e, 0xd0,
-        0x38, 0x77, 0x42, 0xf2, 0xad, 0x85, 0xd4, 0x8e,
-        0x20, 0xbe, 0xb3, 0x59, 0x42, 0xd3, 0x24, 0x51,
-        0x72, 0x20, 0xc2, 0xa9, 0xb9, 0xa2, 0x48, 0x81,
-        0x01, 0x4a, 0x4f, 0xae, 0x00, 0x00, 0x00, 0x00,
-        // FCS
-        0x00, 0x00
-};
 
+void esp_ieee802154_receive_done(uint8_t* frame, esp_ieee802154_frame_info_t* frame_info) {
+    ESP_EARLY_LOGI(RADIO_TAG, "rx OK, received %d bytes", frame[0]);
+}
+
+void esp_ieee802154_receive_failed(uint16_t error) {
+    ESP_EARLY_LOGI(RADIO_TAG, "rx failed, error %d", error);
+}
+
+void esp_ieee802154_receive_sfd_done(void) {
+    ESP_EARLY_LOGI(RADIO_TAG, "rx sfd done, Radio state: %d", esp_ieee802154_get_state());
+}
 void esp_ieee802154_transmit_done(const uint8_t *frame, const uint8_t *ack, esp_ieee802154_frame_info_t *ack_frame_info) {
     ESP_EARLY_LOGI(RADIO_TAG, "tx OK, sent %d bytes, ack %d", frame[0], ack != NULL);
 }
@@ -48,6 +48,10 @@ void esp_ieee802154_transmit_sfd_done(uint8_t *frame) {
     ESP_EARLY_LOGI(RADIO_TAG, "tx sfd done");
 }
 
+void send_broadcast(uint16_t pan_id);
+void send_direct_long(uint16_t pan_id, uint8_t dst_long[8], bool ack);
+void send_direct_short(uint16_t pan_id, uint16_t dst_short, bool ack);
+
 void app_main() {
     ESP_LOGI(TAG, "Initializing NVS from flash...");
     esp_err_t err = nvs_flash_init();
@@ -58,43 +62,150 @@ void app_main() {
     ESP_ERROR_CHECK(err);
 
     ESP_ERROR_CHECK(esp_ieee802154_enable());
-    ESP_ERROR_CHECK(esp_ieee802154_set_promiscuous(true));
+    ESP_ERROR_CHECK(esp_ieee802154_set_coordinator(false));
+    ESP_ERROR_CHECK(esp_ieee802154_set_promiscuous(false));
     ESP_ERROR_CHECK(esp_ieee802154_set_rx_when_idle(true));
 
     ESP_ERROR_CHECK(esp_ieee802154_set_panid(PANID));
-    ESP_ERROR_CHECK(esp_ieee802154_set_coordinator(false));
-
     ESP_ERROR_CHECK(esp_ieee802154_set_channel(CHANNEL));
 
-    esp_phy_calibration_data_t cal_data;
-    ESP_ERROR_CHECK(esp_phy_load_cal_data_from_nvs(&cal_data));
+    uint8_t eui64[8] = {0};
+    esp_read_mac(eui64, ESP_MAC_IEEE802154);
+    esp_ieee802154_set_extended_address(eui64);
+    esp_ieee802154_set_short_address(SHORT_TEST_SENDER);
 
-    // Set long address to the mac address (with 0xff padding at the end)
-    // Set short address to unconfigured
-    uint8_t long_address[8];
-    memcpy(&long_address, cal_data.mac, 6);
-    long_address[6] = 0xff;
-    long_address[7] = 0xfe;
-    esp_ieee802154_set_extended_address(long_address);
-    esp_ieee802154_set_short_address(SHORT_SENDER);
+    ESP_ERROR_CHECK(esp_ieee802154_receive());
 
-    uint8_t radio_long_address[8];
-    esp_ieee802154_get_extended_address(radio_long_address);
-    ESP_LOGI(TAG, "Sender ready, panId=0x%04x, channel=%d, long=%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x, short=%04x",
+    uint8_t extended_address[8];
+    esp_ieee802154_get_extended_address(extended_address);
+    ESP_LOGI(TAG, "Ready, panId=0x%04x, channel=%d, long=%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x, short=%04x",
              esp_ieee802154_get_panid(), esp_ieee802154_get_channel(),
-             radio_long_address[0], radio_long_address[1], radio_long_address[2], radio_long_address[3],
-             radio_long_address[4], radio_long_address[5], radio_long_address[6], radio_long_address[7],
+             extended_address[0], extended_address[1], extended_address[2], extended_address[3],
+             extended_address[4], extended_address[5], extended_address[6], extended_address[7],
              esp_ieee802154_get_short_address());
 
-    int j = 17;
-    for (int i = 0; i < 8; ++i) {
-        test_packet[j--] = radio_long_address[i];
-    }
-
-    // All done, the rest is up to handlers
+    // This device should try to communicate with the
+    // ieee802154-receiver app. It will send a sequence of packets using various
+    // addressing methods to see what works.
+    uint8_t peer[8] = { 0x40, 0x4c, 0xca, 0x40, 0x28, 0xdc, 0xfe, 0xff};
+    uint16_t peer_short = 0x2222;
     while (true) {
-        esp_ieee802154_transmit(test_packet, false);
+        send_broadcast(PANID);
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(5000));
+
+        send_direct_long(PANID, peer, false);
+
+        vTaskDelay(pdMS_TO_TICKS(5000));
+
+        send_direct_short(PANID, peer_short, false);
+
+        vTaskDelay(pdMS_TO_TICKS(5000));
+
+        send_direct_long(PANID, peer, true);
+
+        vTaskDelay(pdMS_TO_TICKS(5000));
+
+        send_direct_short(PANID, peer_short, true);
+
+        vTaskDelay(pdMS_TO_TICKS(20000));
     }
+}
+
+void send_broadcast(uint16_t pan_id) {
+    ESP_LOGI(TAG, "Send broadcast from pan %04x", pan_id);
+    uint8_t buffer[256];
+
+    esp_ieee802154_set_panid(pan_id);
+
+    uint8_t eui64[8];
+    esp_ieee802154_get_extended_address(eui64);
+
+    ieee802154_address_t src = {
+            .mode = ADDR_MODE_LONG,
+            .long_address = { eui64[0], eui64[1], eui64[2], eui64[3], eui64[4], eui64[5], eui64[6], eui64[7]}
+    };
+
+    ieee802154_address_t dst = {
+        .mode = ADDR_MODE_SHORT,
+        .short_address = SHORT_BROADCAST
+    };
+
+    uint16_t dst_pan = PAN_BROADCAST;
+
+    uint8_t hdr_len = ieee802154_header(&pan_id, &src, &dst_pan, &dst, false, &buffer[1], sizeof(buffer) - 1);
+
+    // Add the local eui64 as payload
+    memcpy(&buffer[1 + hdr_len], eui64, 8);
+
+    // packet length
+    buffer[0] = hdr_len + 8;
+
+    esp_ieee802154_transmit(buffer, false);
+}
+
+void send_direct_long(uint16_t pan_id, uint8_t dst_long[8], bool ack) {
+    ESP_LOGI(TAG, "Send direct message to %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x on pan %04x%s",
+             dst_long[0], dst_long[1], dst_long[2], dst_long[3], dst_long[4], dst_long[5], dst_long[6], dst_long[7],
+             pan_id, ack ? " with ack" : "");
+    uint8_t buffer[256];
+
+    esp_ieee802154_set_panid(pan_id);
+
+    uint8_t eui64[8];
+    esp_ieee802154_get_extended_address(eui64);
+
+    ieee802154_address_t src = {
+            .mode = ADDR_MODE_LONG,
+            .long_address = { eui64[0], eui64[1], eui64[2], eui64[3], eui64[4], eui64[5], eui64[6], eui64[7]}
+    };
+
+    ieee802154_address_t dst = {
+            .mode = ADDR_MODE_LONG,
+            .long_address = { dst_long[0], dst_long[1], dst_long[2], dst_long[3], dst_long[4], dst_long[5], dst_long[6], dst_long[7]}
+    };
+
+    uint16_t dst_pan = PANID;
+
+    uint8_t hdr_len = ieee802154_header(&pan_id, &src, &dst_pan, &dst, ack, &buffer[1], sizeof(buffer) - 1);
+
+    // Add the local eui64 as payload
+    memcpy(&buffer[1 + hdr_len], eui64, 8);
+
+    // packet length
+    buffer[0] = hdr_len + 8;
+
+    esp_ieee802154_transmit(buffer, false);
+}
+
+void send_direct_short(uint16_t pan_id, uint16_t dst_short, bool ack) {
+    ESP_LOGI(TAG, "Send direct message to %04x on pan %04x%s", dst_short, pan_id, ack ? " with ack" : "");
+    uint8_t buffer[256];
+
+    esp_ieee802154_set_panid(pan_id);
+
+    uint8_t eui64[8];
+    esp_ieee802154_get_extended_address(eui64);
+
+    ieee802154_address_t src = {
+            .mode = ADDR_MODE_LONG,
+            .long_address = { eui64[0], eui64[1], eui64[2], eui64[3], eui64[4], eui64[5], eui64[6], eui64[7]}
+    };
+
+    ieee802154_address_t dst = {
+            .mode = ADDR_MODE_SHORT,
+            .short_address = dst_short
+    };
+
+    uint16_t dst_pan = PANID;
+
+    uint8_t hdr_len = ieee802154_header(&pan_id, &src, &dst_pan, &dst, ack, &buffer[1], sizeof(buffer) - 1);
+
+    // Add the local eui64 as payload
+    memcpy(&buffer[1 + hdr_len], eui64, 8);
+
+    // packet length
+    buffer[0] = hdr_len + 8;
+
+    esp_ieee802154_transmit(buffer, false);
 }
